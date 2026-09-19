@@ -1,6 +1,9 @@
 import streamlit as st
 import pandas as pd
-import matplotlib.pyplot as plt
+import os
+
+from dotenv import load_dotenv
+from supabase import create_client, Client
 
 from sklearn.model_selection import train_test_split
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -9,139 +12,466 @@ from sklearn.metrics import (
     accuracy_score,
     precision_score,
     recall_score,
-    f1_score,
-    confusion_matrix
+    f1_score
 )
 
-# =====================================================
+
+# ==============================
 # PAGE SETTINGS
-# =====================================================
+# ==============================
 
 st.set_page_config(
-    page_title="AI Fake Job Detector",
+    page_title="AI Fake Job Posting Detector",
     page_icon="🔍",
-    layout="centered"
+    layout="wide"
 )
 
-# =====================================================
+
+# ==============================
+# LOAD ENVIRONMENT VARIABLES
+# ==============================
+
+load_dotenv(override=True)
+
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
+
+
+# ==============================
+# CHECK SUPABASE CREDENTIALS
+# ==============================
+
+if not SUPABASE_URL:
+    st.error("❌ SUPABASE_URL not found in .env file.")
+    st.stop()
+
+if not SUPABASE_ANON_KEY:
+    st.error("❌ SUPABASE_ANON_KEY not found in .env file.")
+    st.stop()
+
+
+# ==============================
+# SUPABASE CONNECTION
+# ==============================
+
+try:
+
+    supabase: Client = create_client(
+        SUPABASE_URL,
+        SUPABASE_ANON_KEY
+    )
+
+except Exception as e:
+
+    st.error(
+        f"❌ Supabase connection failed: {e}"
+    )
+
+    st.stop()
+
+
+# ==============================
+# SUPABASE CONNECTION STATUS
+# ==============================
+
+st.sidebar.success(
+    "🟢 Supabase Connected"
+)
+
+
+# ==============================
+# SAVE PREDICTION TO SUPABASE
+# ==============================
+
+def save_prediction(
+    job_description,
+    prediction_text,
+    confidence,
+    risk_level,
+    suspicious_indicators
+):
+
+    try:
+
+        prediction_data = {
+
+            "job_description": job_description,
+
+            "prediction": prediction_text,
+
+            "confidence": float(confidence),
+
+            "risk_level": risk_level,
+
+            "suspicious_indicators": int(
+                suspicious_indicators
+            )
+
+        }
+
+
+        supabase.table(
+            "job_predictions"
+        ).insert(
+            prediction_data
+        ).execute()
+
+
+        return True
+
+
+    except Exception as e:
+
+        st.error(
+            f"❌ Database save failed: {e}"
+        )
+
+        return False
+
+
+# ==============================
+# GET PREDICTION HISTORY
+# ==============================
+
+def get_history():
+
+    try:
+
+        response = (
+
+            supabase
+
+            .table("job_predictions")
+
+            .select(
+                "id, "
+                "job_description, "
+                "prediction, "
+                "confidence, "
+                "risk_level, "
+                "suspicious_indicators, "
+                "created_at"
+            )
+
+            .order(
+                "created_at",
+                desc=True
+            )
+
+            .limit(10)
+
+            .execute()
+
+        )
+
+
+        if response.data:
+
+            return pd.DataFrame(
+                response.data
+            )
+
+
+        return pd.DataFrame()
+
+
+    except Exception as e:
+
+        st.warning(
+            f"⚠️ Could not load prediction history: {e}"
+        )
+
+        return pd.DataFrame()
+
+
+# ==============================
 # TITLE
-# =====================================================
+# ==============================
 
-st.title("🔍 AI Fake Job Posting Detector")
-
-st.write(
-    "Enter a job description to check whether it is REAL or FAKE."
+st.title(
+    "🔍 AI Fake Job Posting Detector"
 )
 
-st.divider()
+st.caption(
+    "Machine Learning based job scam detection system"
+)
 
-# =====================================================
-# PREDICTION HISTORY
-# =====================================================
 
-if "history" not in st.session_state:
-    st.session_state.history = []
-
-# =====================================================
+# ==============================
 # LOAD DATASET
-# =====================================================
+# ==============================
 
-data = pd.read_csv("dataset.csv")
+try:
+
+    data = pd.read_csv(
+        "dataset.csv"
+    )
+
+except FileNotFoundError:
+
+    st.error(
+        "❌ dataset.csv not found."
+    )
+
+    st.stop()
+
+
+# ==============================
+# CHECK DATASET COLUMNS
+# ==============================
+
+if (
+    "job_description" not in data.columns
+    or "label" not in data.columns
+):
+
+    st.error(
+        "❌ dataset.csv must contain: "
+        "job_description and label"
+    )
+
+    st.stop()
+
+
+# ==============================
+# CLEAN DATA
+# ==============================
 
 data = data.dropna(
-    subset=["job_description", "label"]
+    subset=[
+        "job_description",
+        "label"
+    ]
 )
+
 
 data["job_description"] = data[
     "job_description"
 ].astype(str)
 
-# =====================================================
-# DATASET INFORMATION
-# =====================================================
 
-st.subheader("📊 Dataset Information")
+# ==============================
+# CONVERT LABEL
+# ==============================
+
+def convert_label(value):
+
+    value = str(
+        value
+    ).strip().lower()
+
+
+    if value in [
+        "fake",
+        "1",
+        "true"
+    ]:
+
+        return 1
+
+
+    if value in [
+        "real",
+        "0",
+        "false"
+    ]:
+
+        return 0
+
+
+    return None
+
+
+data["label"] = data[
+    "label"
+].apply(
+    convert_label
+)
+
+
+data = data.dropna(
+    subset=[
+        "label"
+    ]
+)
+
+
+data["label"] = data[
+    "label"
+].astype(int)
+
+
+# ==============================
+# DATASET OVERVIEW
+# ==============================
+
+st.subheader(
+    "📊 Dataset Overview"
+)
+
+
+total_jobs = len(
+    data
+)
+
+
+real_jobs = int(
+    (
+        data["label"] == 0
+    ).sum()
+)
+
+
+fake_jobs = int(
+    (
+        data["label"] == 1
+    ).sum()
+)
+
 
 col1, col2, col3 = st.columns(3)
 
+
 with col1:
+
     st.metric(
         "Total Jobs",
-        len(data)
+        total_jobs
     )
+
 
 with col2:
+
     st.metric(
         "Real Jobs",
-        len(data[data["label"] == 0])
+        real_jobs
     )
+
 
 with col3:
+
     st.metric(
         "Fake Jobs",
-        len(data[data["label"] == 1])
+        fake_jobs
     )
 
-st.divider()
 
-# =====================================================
-# DATA PREPARATION
-# =====================================================
+# ==============================
+# PREPARE DATA
+# ==============================
 
-X = data["job_description"]
-y = data["label"]
+X = data[
+    "job_description"
+]
+
+y = data[
+    "label"
+]
+
+
+if len(data) < 10:
+
+    st.error(
+        "❌ Dataset is too small."
+    )
+
+    st.stop()
+
+
+if y.nunique() < 2:
+
+    st.error(
+        "❌ Dataset must contain both "
+        "Real and Fake jobs."
+    )
+
+    st.stop()
+
+
+# ==============================
+# TRAIN TEST SPLIT
+# ==============================
 
 X_train, X_test, y_train, y_test = train_test_split(
+
     X,
+
     y,
-    test_size=0.2,
+
+    test_size=0.20,
+
     random_state=42,
+
     stratify=y
+
 )
 
-# =====================================================
+
+# ==============================
 # TF-IDF
-# =====================================================
+# ==============================
 
 vectorizer = TfidfVectorizer(
-    max_features=5000,
-    ngram_range=(1, 2),
-    stop_words="english"
+
+    stop_words="english",
+
+    max_features=3000,
+
+    ngram_range=(1, 2)
+
 )
 
-X_train_vector = vectorizer.fit_transform(
+
+X_train_tfidf = vectorizer.fit_transform(
     X_train
 )
 
-X_test_vector = vectorizer.transform(
+
+X_test_tfidf = vectorizer.transform(
     X_test
 )
 
-# =====================================================
+
+# ==============================
 # TRAIN MODEL
-# =====================================================
+# ==============================
 
 model = LogisticRegression(
-    max_iter=1000
+
+    max_iter=1000,
+
+    random_state=42
+
 )
+
 
 model.fit(
-    X_train_vector,
+
+    X_train_tfidf,
+
     y_train
+
 )
 
-# =====================================================
-# MODEL EVALUATION
-# =====================================================
+
+# ==============================
+# MODEL PREDICTION
+# ==============================
 
 y_pred = model.predict(
-    X_test_vector
+    X_test_tfidf
 )
+
+
+# ==============================
+# MODEL METRICS
+# ==============================
 
 accuracy = accuracy_score(
     y_test,
     y_pred
 )
+
 
 precision = precision_score(
     y_test,
@@ -149,11 +479,13 @@ precision = precision_score(
     zero_division=0
 )
 
+
 recall = recall_score(
     y_test,
     y_pred,
     zero_division=0
 )
+
 
 f1 = f1_score(
     y_test,
@@ -161,278 +493,392 @@ f1 = f1_score(
     zero_division=0
 )
 
-cm = confusion_matrix(
-    y_test,
-    y_pred
+
+# ==============================
+# MODEL PERFORMANCE
+# ==============================
+
+st.subheader(
+    "🎯 Model Performance"
 )
 
-# =====================================================
-# MODEL PERFORMANCE
-# =====================================================
-
-st.subheader("🎯 Model Performance")
 
 col1, col2, col3, col4 = st.columns(4)
 
+
 with col1:
+
     st.metric(
         "Accuracy",
         f"{accuracy * 100:.2f}%"
     )
 
+
 with col2:
+
     st.metric(
         "Precision",
         f"{precision * 100:.2f}%"
     )
 
+
 with col3:
+
     st.metric(
         "Recall",
         f"{recall * 100:.2f}%"
     )
 
+
 with col4:
+
     st.metric(
         "F1 Score",
         f"{f1 * 100:.2f}%"
     )
 
-st.divider()
 
-# =====================================================
-# PERFORMANCE GRAPH
-# =====================================================
-
-st.subheader("📊 Model Performance Graph")
-
-performance = pd.DataFrame(
-    {
-        "Score": [
-            accuracy * 100,
-            precision * 100,
-            recall * 100,
-            f1 * 100
-        ]
-    },
-    index=[
-        "Accuracy",
-        "Precision",
-        "Recall",
-        "F1 Score"
-    ]
-)
-
-st.bar_chart(performance)
+# ==============================
+# JOB CHECKER
+# ==============================
 
 st.divider()
 
-# =====================================================
-# CONFUSION MATRIX
-# =====================================================
 
-st.subheader("🔲 Confusion Matrix")
-
-fig, ax = plt.subplots()
-
-ax.imshow(cm)
-
-ax.set_xlabel("Predicted")
-ax.set_ylabel("Actual")
-
-ax.set_xticks([0, 1])
-ax.set_yticks([0, 1])
-
-ax.set_xticklabels(
-    ["Real", "Fake"]
+st.subheader(
+    "🔎 Check a Job Posting"
 )
 
-ax.set_yticklabels(
-    ["Real", "Fake"]
-)
 
-for i in range(2):
-    for j in range(2):
+job_text = st.text_area(
 
-        ax.text(
-            j,
-            i,
-            cm[i, j],
-            ha="center",
-            va="center"
-        )
-
-st.pyplot(fig)
-
-# =====================================================
-# CONFUSION MATRIX TABLE
-# =====================================================
-
-cm_df = pd.DataFrame(
-    cm,
-    index=[
-        "Actual Real",
-        "Actual Fake"
-    ],
-    columns=[
-        "Predicted Real",
-        "Predicted Fake"
-    ]
-)
-
-st.table(cm_df)
-
-st.divider()
-
-# =====================================================
-# JOB PREDICTION
-# =====================================================
-
-st.subheader("📝 Check a Job Posting")
-
-job = st.text_area(
     "Enter Job Description",
-    height=200,
-    placeholder="Paste the job description here..."
+
+    placeholder=(
+        "Paste the job description here..."
+    ),
+
+    height=200
+
 )
 
-# =====================================================
-# CHECK JOB BUTTON
-# =====================================================
+
+# ==============================
+# CHECK JOB
+# ==============================
 
 if st.button(
     "🔍 Check Job",
-    use_container_width=True
+    type="primary"
 ):
 
-    if job.strip() == "":
+
+    if job_text.strip() == "":
 
         st.warning(
             "⚠️ Please enter a job description."
         )
 
-    else:
+        st.stop()
 
-        # Convert text into TF-IDF
-        job_vector = vectorizer.transform(
-            [job]
-        )
 
-        # Prediction
-        prediction = model.predict(
-            job_vector
-        )[0]
+    # ==============================
+    # PREDICT
+    # ==============================
 
-        # Probability
-        probability = model.predict_proba(
-            job_vector
-        )[0]
+    job_vector = vectorizer.transform(
+        [job_text]
+    )
 
-        # Confidence
-        confidence = max(
-            probability
-        ) * 100
 
-        st.divider()
+    prediction = model.predict(
+        job_vector
+    )[0]
 
-        # =================================================
-        # FAKE JOB
-        # =================================================
 
-        if prediction == 1:
+    probabilities = model.predict_proba(
+        job_vector
+    )[0]
 
-            st.error(
-                "🚨 FAKE JOB"
+
+    confidence = (
+        max(probabilities) * 100
+    )
+
+
+    # ==============================
+    # SUSPICIOUS WORDS
+    # ==============================
+
+    suspicious_words = [
+
+        "registration fee",
+
+        "processing fee",
+
+        "pay money",
+
+        "pay rs",
+
+        "security deposit",
+
+        "joining fee",
+
+        "training fee",
+
+        "membership fee",
+
+        "send money",
+
+        "send otp",
+
+        "bank details",
+
+        "upi",
+
+        "no interview",
+
+        "guaranteed job",
+
+        "work from home",
+
+        "daily income",
+
+        "earn daily",
+
+        "whatsapp"
+
+    ]
+
+
+    text_lower = job_text.lower()
+
+
+    found_words = []
+
+
+    for word in suspicious_words:
+
+        if word in text_lower:
+
+            found_words.append(
+                word
             )
 
-            st.write(
-                f"### Confidence: {confidence:.2f}%"
-            )
 
-            st.warning(
-                "⚠️ This job posting may contain "
-                "suspicious details."
-            )
+    # ==============================
+    # FAKE JOB
+    # ==============================
 
-            st.info(
-                "Do not pay registration fees, "
-                "share bank details, passwords, "
-                "or OTPs."
-            )
+    if prediction == 1:
 
-            result = "FAKE JOB"
+        prediction_text = "FAKE"
 
-        # =================================================
-        # REAL JOB
-        # =================================================
+
+        if len(found_words) >= 3:
+
+            risk_level = "HIGH RISK"
+
+
+        elif len(found_words) >= 1:
+
+            risk_level = "MEDIUM RISK"
+
 
         else:
 
-            st.success(
-                "✅ REAL JOB"
-            )
+            risk_level = "POTENTIAL RISK"
 
-            st.write(
-                f"### Confidence: {confidence:.2f}%"
-            )
 
-            st.info(
-                "This job description looks legitimate "
-                "based on the trained dataset."
-            )
-
-            st.warning(
-                "Always verify the company and job posting "
-                "before applying."
-            )
-
-            result = "REAL JOB"
-
-        # =================================================
-        # SAVE HISTORY
-        # =================================================
-
-        st.session_state.history.append(
-            [
-                job[:100],
-                result,
-                f"{confidence:.2f}%"
-            ]
+        st.error(
+            "🚨 FAKE JOB"
         )
 
-# =====================================================
+
+        st.subheader(
+            f"🎯 Prediction Confidence: "
+            f"{confidence:.2f}%"
+        )
+
+
+        st.progress(
+            int(
+                min(
+                    confidence,
+                    100
+                )
+            )
+        )
+
+
+        st.subheader(
+            "⚠️ Job Risk Analysis"
+        )
+
+
+        st.write(
+            f"Suspicious Indicators: "
+            f"{len(found_words)}"
+        )
+
+
+        if found_words:
+
+            st.warning(
+                "Suspicious indicators found:"
+            )
+
+
+            for word in found_words:
+
+                st.write(
+                    f"🔴 {word}"
+                )
+
+
+        st.subheader(
+            "🛡️ Safety Recommendations"
+        )
+
+
+        st.write(
+            "• Do not pay registration or processing fees."
+        )
+
+
+        st.write(
+            "• Do not share OTP or passwords."
+        )
+
+
+        st.write(
+            "• Do not share bank account details."
+        )
+
+
+        st.write(
+            "• Verify the company through its official website."
+        )
+
+
+        st.write(
+            "• Never send money through UPI for getting a job."
+        )
+
+
+        st.info(
+            f"Risk Level: {risk_level}"
+        )
+
+
+    # ==============================
+    # REAL JOB
+    # ==============================
+
+    else:
+
+        prediction_text = "REAL"
+
+
+        risk_level = "LOW RISK"
+
+
+        st.success(
+            "✅ REAL JOB"
+        )
+
+
+        st.subheader(
+            f"🎯 Prediction Confidence: "
+            f"{confidence:.2f}%"
+        )
+
+
+        st.progress(
+            int(
+                min(
+                    confidence,
+                    100
+                )
+            )
+        )
+
+
+        st.info(
+            "This job posting appears legitimate "
+            "according to the trained model. "
+            "Always verify the company before applying."
+        )
+
+
+    # ==============================
+    # SAVE TO SUPABASE
+    # ==============================
+
+    saved = save_prediction(
+
+        job_description=job_text,
+
+        prediction_text=prediction_text,
+
+        confidence=confidence,
+
+        risk_level=risk_level,
+
+        suspicious_indicators=len(
+            found_words
+        )
+
+    )
+
+
+    if saved:
+
+        st.success(
+            "💾 Prediction saved to Supabase successfully!"
+        )
+
+
+# ==============================
 # PREDICTION HISTORY
-# =====================================================
-
-if st.session_state.history:
-
-    st.divider()
-
-    st.subheader(
-        "📜 Prediction History"
-    )
-
-    history_df = pd.DataFrame(
-        st.session_state.history,
-        columns=[
-            "Job Description",
-            "Prediction",
-            "Confidence"
-        ]
-    )
-
-    st.dataframe(
-        history_df,
-        use_container_width=True
-    )
-
-# =====================================================
-# FOOTER
-# =====================================================
+# ==============================
 
 st.divider()
 
+
+st.subheader(
+    "📜 Prediction History"
+)
+
+
+history = get_history()
+
+
+if not history.empty:
+
+    st.dataframe(
+
+        history,
+
+        use_container_width=True
+
+    )
+
+else:
+
+    st.info(
+        "No prediction history yet."
+    )
+
+
+# ==============================
+# FOOTER
+# ==============================
+
+st.divider()
+
+
 st.caption(
     "AI Fake Job Posting Detector | "
-    "Python + Machine Learning"
+    "Python • Machine Learning • Streamlit • Supabase"
 )
